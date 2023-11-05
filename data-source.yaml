@@ -1,0 +1,486 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation template designed to orchestrate a workflow that fetches data from AWS Organizations and persists it to a DynamoDB table.
+
+Metadata:
+  Author: Tomek Klas
+  Email: aws-org-metadata@tomekklas.com
+  SourceRepository: https://github.com/tomekklas/aws-org-metadata
+  Date: 2023-11-02
+  Version: 1.0.0
+  License: Apache License 2.0
+  Description: >
+    The CloudFormation template establishes a serverless Lambda function to automate
+    the retrieval of AWS Organization account details and their hierarchical structures, 
+    storing this data in DynamoDB for efficient access and management. 
+    By assuming a cross-account role and using AWS SDK, the Lambda function systematically 
+    collects account information and tags, then populates a DynamoDB table, 
+    facilitating improved organizational oversight and resource governance.
+
+Parameters:
+  OrgCrossAccountRoleArn:
+    Description: The Amazon Resource Name (ARN) of the IAM role outputted by the master-role.yaml template in the management account. This ARN is used by the Lambda function to assume the role for cross-account access.
+    Type: String
+    AllowedPattern: 'arn:aws:iam::[0-9]{12}:role/.+'
+    ConstraintDescription: Must be a valid ARN of an IAM role in the format arn:aws:iam::{account}:role/{rolename}.
+
+  CrossAccountRoleARNExternalId:
+    Description: A unique identifier outputted by the master-role.yaml template in the management account. It is used in conjunction with the OrgCrossAccountRoleArn to enhance security during the cross-account role assumption process.
+    Type: String
+    NoEcho: true
+    AllowedPattern: 'id-[0-9a-fA-F]{12,}'
+    ConstraintDescription: The CrossAccountRoleARNExternalId must match the required format, e.g., id-02bd6988d8d3.
+
+Resources:
+
+  OrgMetadataDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: name
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: emailAddress
+          AttributeType: S
+        - AttributeName: ouLevel1
+          AttributeType: S
+        - AttributeName: ouLevel2
+          AttributeType: S
+        - AttributeName: ouLevel3
+          AttributeType: S
+        - AttributeName: ouLevel4
+          AttributeType: S
+        - AttributeName: ouLevel5
+          AttributeType: S
+        - AttributeName: flattenedTags
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: NameIndex
+          KeySchema:
+            - AttributeName: name
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: StatusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: EmailIndex
+          KeySchema:
+            - AttributeName: emailAddress
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: OULevel1Index
+          KeySchema:
+            - AttributeName: ouLevel1
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: OULevel2Index
+          KeySchema:
+            - AttributeName: ouLevel2
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: OULevel3Index
+          KeySchema:
+            - AttributeName: ouLevel3
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: OULevel4Index
+          KeySchema:
+            - AttributeName: ouLevel4
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: OULevel5Index
+          KeySchema:
+            - AttributeName: ouLevel5
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: TagsIndex
+          KeySchema:
+            - AttributeName: flattenedTags
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  AccountIdQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: AccountIdQueue
+      VisibilityTimeout: 120
+      KmsMasterKeyId: alias/aws/sqs
+      KmsDataKeyReusePeriodSeconds: 300
+
+  FetchAccountIdsLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: AssumeRoleAndSendToSQSPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - !Ref OrgCrossAccountRoleArn
+                Condition:
+                  StringEquals:
+                    sts:ExternalId: !Ref CrossAccountRoleARNExternalId
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource:
+                  - !GetAtt AccountIdQueue.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  FetchAccountIdsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt FetchAccountIdsLambdaExecutionRole.Arn
+      FunctionName: FetchAccountIdsLambda
+      Runtime: python3.11
+      Timeout: 600
+      Environment:
+        Variables:
+          SQS_URL: !Ref AccountIdQueue
+          ORG_CROSS_ACCOUNT_ROLE_ARN: !Ref OrgCrossAccountRoleArn
+          EXTERNAL_ID: !Ref CrossAccountRoleARNExternalId
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          import logging
+          from botocore.exceptions import ClientError
+
+          # Constants
+          BATCH_SIZE = 10
+          ROLE_SESSION_NAME = 'AWSOrgMetadataRole'
+
+          # Set up logging
+          logging.basicConfig(level=logging.INFO)
+          logger = logging.getLogger(__name__)
+
+          # Validate environment variables
+          ORG_CROSS_ACCOUNT_ROLE_ARN = os.environ.get('ORG_CROSS_ACCOUNT_ROLE_ARN')
+          EXTERNAL_ID = os.environ.get('EXTERNAL_ID')
+          SQS_URL = os.environ.get('SQS_URL')
+
+          if not all([ORG_CROSS_ACCOUNT_ROLE_ARN, EXTERNAL_ID, SQS_URL]):
+              logger.error("Environment variables ORG_CROSS_ACCOUNT_ROLE_ARN, EXTERNAL_ID, or SQS_URL are not set.")
+              raise ValueError("Required environment variables are missing.")
+
+          # Initialize clients
+          sts_client = boto3.client('sts')
+          sqs_client = boto3.client('sqs')
+
+          def assume_role(role_arn, external_id):
+              try:
+                  assumed_role_object = sts_client.assume_role(
+                      RoleArn=role_arn,
+                      RoleSessionName=ROLE_SESSION_NAME,
+                      ExternalId=external_id
+                  )
+                  return assumed_role_object['Credentials']
+              except ClientError as error:
+                  logger.error(f"Error assuming role: {error}")
+                  raise
+
+          def get_org_client(credentials):
+              return boto3.client(
+                  'organizations',
+                  aws_access_key_id=credentials['AccessKeyId'],
+                  aws_secret_access_key=credentials['SecretAccessKey'],
+                  aws_session_token=credentials['SessionToken']
+              )
+
+          def send_to_sqs(sqs_url, messages):
+              for i in range(0, len(messages), BATCH_SIZE):
+                  batch = messages[i:i+BATCH_SIZE]
+                  try:
+                      response = sqs_client.send_message_batch(
+                          QueueUrl=sqs_url,
+                          Entries=batch
+                      )
+                      if 'Failed' in response:
+                          logger.error(f"Failed to send some messages: {response['Failed']}")
+                  except ClientError as error:
+                      logger.error(f"Error sending message batch: {error}")
+
+          def handler(event, context):
+              try:
+                  # Assume Role and get credentials
+                  credentials = assume_role(ORG_CROSS_ACCOUNT_ROLE_ARN, EXTERNAL_ID)
+
+                  # Get the Organizations client using the assumed role credentials
+                  org_client = get_org_client(credentials)
+
+                  # Fetch account IDs
+                  account_ids = []
+                  paginator = org_client.get_paginator('list_accounts')
+                  for page in paginator.paginate():
+                      for account in page['Accounts']:
+                          account_ids.append(account['Id'])
+
+                  # Prepare messages for SQS
+                  messages = [{'Id': str(idx), 'MessageBody': json.dumps({'AccountId': account_id})}
+                              for idx, account_id in enumerate(account_ids)]
+
+                  # Send account IDs to SQS in batches
+                  send_to_sqs(SQS_URL, messages)
+                  logger.info(f"Successfully sent {len(account_ids)} account IDs to SQS.")
+
+              except Exception as error:
+                  logger.error(f"An error occurred: {error}")
+                  raise
+
+  AccountIdsLambdaTrigger:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: cron(0 11 * * ? *)
+      Targets:
+        - Arn: !GetAtt FetchAccountIdsLambda.Arn
+          Id: FetchAccountIdsLambdaTarget
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref FetchAccountIdsLambda
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AccountIdsLambdaTrigger.Arn
+
+  OrgMetadataUpdaterLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaDynamoDBAccessPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt OrgMetadataDynamoDBTable.Arn
+        - PolicyName: LambdaSTSAssumeRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: !Ref OrgCrossAccountRoleArn
+        - PolicyName: LambdaCloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*
+        - PolicyName: LambdaOrganizationsAccessPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - organizations:List*
+                Resource: '*'  
+        - PolicyName: LambdaSQSAccessPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt AccountIdQueue.Arn
+
+  OrgMetadataUpdaterLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt OrgMetadataUpdaterLambdaExecutionRole.Arn
+      Runtime: python3.11
+      Timeout: 90
+      MemorySize: 256
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref OrgMetadataDynamoDBTable
+          ORG_CROSS_ACCOUNT_ROLE_ARN: !Ref OrgCrossAccountRoleArn
+          EXTERNAL_ID: !Ref CrossAccountRoleARNExternalId
+          RETRY_MODE: 'standard' # or 'adaptive'
+          MAX_ATTEMPTS: '5'
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import logging
+          import json
+          from botocore.exceptions import ClientError
+          from botocore.config import Config
+
+          # Setup logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Environment variables
+          ORG_CROSS_ACCOUNT_ROLE_ARN = os.environ.get('ORG_CROSS_ACCOUNT_ROLE_ARN')
+          TABLE_NAME = os.environ.get('DYNAMODB_TABLE')
+          EXTERNAL_ID = os.environ.get('EXTERNAL_ID')
+          RETRY_MODE = os.environ.get('RETRY_MODE', 'standard')
+          MAX_ATTEMPTS = int(os.environ.get('MAX_ATTEMPTS', 5))
+
+          # Config for botocore retries
+          retry_config = Config(
+              retries={
+                  'max_attempts': MAX_ATTEMPTS,
+                  'mode': RETRY_MODE
+              }
+          )
+
+          # Clients creation
+          sts_client = boto3.client('sts', config=retry_config)
+          dynamodb_resource = boto3.resource('dynamodb', config=retry_config)
+
+          def get_complete_ou_path(org_client, child_id):
+              path = []
+              while child_id:
+                  parents = org_client.list_parents(ChildId=child_id)
+                  parent_id = parents['Parents'][0]['Id']
+                  parent_type = parents['Parents'][0]['Type']
+
+                  path.insert(0, parent_id)
+                  child_id = parent_id if parent_type == 'ORGANIZATIONAL_UNIT' else None
+              return path
+
+          def handler(event, context):
+              try:
+                  org_cross_account_role_arn = event.get('OrgCrossAccountRoleArn', ORG_CROSS_ACCOUNT_ROLE_ARN)
+
+                  sts_client = boto3.client('sts', config=retry_config)
+                  assumed_role_object = sts_client.assume_role(
+                    RoleArn=org_cross_account_role_arn, 
+                    RoleSessionName='LambdaCrossAccountSession',
+                    ExternalId=os.environ['EXTERNAL_ID']
+                    )
+                  credentials = assumed_role_object['Credentials']
+
+                  org_client = boto3.client(
+                      'organizations',
+                      aws_access_key_id=credentials['AccessKeyId'],
+                      aws_secret_access_key=credentials['SecretAccessKey'],
+                      aws_session_token=credentials['SessionToken'],
+                      config=retry_config
+                  )
+
+                  dynamodb_client = boto3.resource('dynamodb', config=retry_config)
+                  table = dynamodb_client.Table(TABLE_NAME)
+
+                  paginator = org_client.get_paginator('list_accounts')
+                  for page in paginator.paginate():
+                      for account in page['Accounts']:
+                          ou_path = get_complete_ou_path(org_client, account['Id'])
+                          tags_response = org_client.list_tags_for_resource(ResourceId=account['Id'])
+
+                          flattened_tags = ",".join([f"{tag['Key']}:{tag['Value']}" for tag in tags_response.get('Tags', [])])
+                          
+                          item = {
+                              'id': account['Id'],
+                              'name': account['Name'],
+                              'status': account['Status'],
+                              'emailAddress': account['Email']
+                          }
+
+                          if flattened_tags:
+                              item['flattenedTags'] = flattened_tags
+
+                          for index, ou_id in enumerate(ou_path, start=1):
+                              item[f'ouLevel{index}'] = ou_id
+
+                          table.put_item(Item=item)
+
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Data fetched and saved successfully!')
+                  }
+
+              except ClientError as e:
+                  logger.error(f"Error processing the request due to AWS service: {e}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('Internal Server Error'),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
+                  }
+              except Exception as e:
+                  logger.error(f"Unhandled error processing the request: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('Internal Server Error'),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
+                  }
+
+  SQSTriggerOrgMetadataUpdaterLambda:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt AccountIdQueue.Arn
+      FunctionName: !GetAtt OrgMetadataUpdaterLambda.Arn
+      BatchSize: 1
+      Enabled: True
+
+Outputs:
+
+  OrgMetadataDynamoDBTable:
+    Description: The name of the DynamoDB table with AWS Organizational data
+    Value: !Ref OrgMetadataDynamoDBTable

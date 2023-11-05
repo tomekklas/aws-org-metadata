@@ -1,0 +1,1025 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  This CloudFormation template deploys an API Gateway secured with necessary protections, interfaced with Lambda functions for serving content from a DynamoDB table containing AWS Organizational data.
+
+Metadata:
+  Author: Tomek Klas
+  Email: aws-org-metadata@tomekklas.com
+  SourceRepository: https://github.com/tomekklas/aws-org-metadata
+  Date: 2023-11-02
+  Version: 1.0.0
+  License: Apache License 2.0
+  Description: >
+    This CloudFormation template provides a streamlined and secure method for 
+    accessing AWS Organizational data stored in a DynamoDB table. 
+    By establishing an API Gateway, it facilitates user connectivity to the data, 
+    while Lambda functions are utilized to process requests. 
+    The configuration ensures secure and dependable access for authorized requests. 
+    The deployment of data-source.yaml is a prerequisite for the operation of this template.
+
+Parameters:
+
+  OrgMetadataDynamoDBTable:
+    Type: String
+    Description: The name of the DynamoDB table where AWS Organizational metadata is stored.
+
+Resources:
+
+  AWSOrgMetadataApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: AWSOrgMetadataService
+      Description: API service to access and manage AWS Organizational Metadata."
+      FailOnWarnings: true
+
+  RootResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !GetAtt AWSOrgMetadataApi.RootResourceId
+      PathPart: aws-org-metadata
+
+  #####################
+  # account_id section
+  AccountIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref RootResource
+      PathPart: account
+
+  AccountIdValueResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref AccountIdResource
+      PathPart: '{account_id}'
+
+  AccountIdLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+        - PolicyName: DynamoDBTablePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                Resource: 
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}
+
+  AccountIdLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt AccountIdLambdaExecutionRole.Arn
+      FunctionName: ReturnAccountIdFunction
+      Runtime: python3.11
+      Environment:
+        Variables:
+          ORG_METADATA_DATA_SOURCE_TABLE: !Ref OrgMetadataDynamoDBTable
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import json
+          import logging
+
+          # Setup logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def unflatten_tags(flattened_tags):
+              """Convert a comma-separated string of key:value pairs into a dictionary."""
+              tags = {}
+              for tag in flattened_tags.split(','):
+                  key, value = tag.split(':')
+                  tags[key] = value
+              return tags
+
+          def handler(event, context):
+              try:
+                  # Extract account IDs from the pathParameters
+                  account_ids = event['pathParameters']['account_id'].split(',')
+
+                  # Initialize a DynamoDB resource
+                  dynamodb = boto3.resource('dynamodb')
+
+                  # Name of your DynamoDB table (you can adjust based on your environment variables or hardcode it)
+                  table_name = os.environ['ORG_METADATA_DATA_SOURCE_TABLE']
+
+                  # Connect to the table
+                  table = dynamodb.Table(table_name)
+
+                  # Use BatchGetItem for fetching multiple items
+                  response = dynamodb.batch_get_item(
+                      RequestItems={
+                          table_name: {
+                              'Keys': [{'id': account_id} for account_id in account_ids]
+                          }
+                      }
+                  )
+
+                  items = response['Responses'].get(table_name, [])
+
+                  # Unflatten the tags for each item
+                  for item in items:
+                      if 'flattenedTags' in item:
+                          item['tags'] = unflatten_tags(item['flattenedTags'])
+                          del item['flattenedTags']
+
+                  # If items are found in the table, return them
+                  if items:
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps(items),
+                          'headers': {
+                              'Content-Type': 'application/json'
+                          }
+                      }
+                  else:
+                      return {
+                          'statusCode': 404,
+                          'body': json.dumps({'error': 'Accounts not found'}),
+                          'headers': {
+                              'Content-Type': 'application/json'
+                          }
+                      }
+
+              except Exception as e:
+                  logger.error(f"Error processing the request: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('Internal Server Error'),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
+                  }
+
+  AccountIdApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AccountIdLambdaFunction
+      Principal: apigateway.amazonaws.com
+
+  AccountIdMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      HttpMethod: GET
+      ResourceId: !Ref AccountIdValueResource
+      RestApiId: !Ref AWSOrgMetadataApi
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            "application/json": 'Empty'
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AccountIdLambdaFunction.Arn}/invocations
+  # account_id section
+  #####################
+
+  ########################
+  # account status section
+  AccountStatusResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref RootResource
+      PathPart: status
+
+  AccountStatusValueResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref AccountStatusResource
+      PathPart: '{status}'
+
+  AccountStatusLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: DynamoDB
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}/index/StatusIndex
+
+  AccountStatusLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt AccountStatusLambdaExecutionRole.Arn
+      FunctionName: ReturnAccountStatusFunction
+      Runtime: python3.11
+      Environment:
+        Variables: 
+          ORG_METADATA_DATA_SOURCE_TABLE: !Ref OrgMetadataDynamoDBTable
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import json
+          import logging
+
+          # Setup logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # TODO: Add this to lambda layer so it can be re-used
+          def unflatten_tags(flattened_tags):
+              """
+              Convert a flattened tag string into a dictionary.
+              """
+              tags = {}
+              for tag_pair in flattened_tags.split(','):
+                  key, value = tag_pair.split(':')
+                  tags[key] = value
+              return tags
+
+
+          def handler(event, context):
+
+              # Extract status from the path parameters
+              status = event.get('pathParameters', {}).get('status')
+              if not status:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'Status parameter is missing'}),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
+                  }
+
+              try:
+                  # DynamoDB client
+                  dynamodb_client = boto3.resource('dynamodb')
+                  table_name = os.environ['ORG_METADATA_DATA_SOURCE_TABLE']
+                  table = dynamodb_client.Table(table_name)
+
+                  # Query DynamoDB based on the status
+                  response = table.query(
+                      IndexName="StatusIndex", 
+                      KeyConditionExpression=boto3.dynamodb.conditions.Key('status').eq(status)
+                  )
+
+                  items = response['Items']
+                  for item in items:
+                      flattened_tags = item.get('flattenedTags')
+                      if flattened_tags:
+                          item['tags'] = unflatten_tags(flattened_tags)
+                          del item['flattenedTags']
+
+                  # Return the results
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(items),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
+                  }
+
+              except Exception as e:
+                  logger.error(f"Error processing the request: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('Internal Server Error'),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
+                  }
+
+  AccountStatusApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AccountStatusLambdaFunction
+      Principal: apigateway.amazonaws.com
+
+  AccountStatusMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      HttpMethod: GET
+      ResourceId: !Ref AccountStatusValueResource
+      RestApiId: !Ref AWSOrgMetadataApi
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            "application/json": 'Empty'
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AccountStatusLambdaFunction.Arn}/invocations
+  # account status section
+  ########################
+
+  #############
+  # tag section
+  TagResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref RootResource
+      PathPart: 'tag'
+
+  TagNameResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref TagResource
+      PathPart: '{tag_name}'
+
+  TagValueResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref TagNameResource
+      PathPart: '{tag_value}'
+
+  TagLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: DynamoDB
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}
+
+  TagLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt TagLambdaExecutionRole.Arn
+      FunctionName: ReturnTagFunction
+      Runtime: python3.11
+      Environment:
+        Variables: 
+          ORG_METADATA_DATA_SOURCE_TABLE: !Ref OrgMetadataDynamoDBTable
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import json
+          import logging
+
+          # Initialize a DynamoDB client and table reference
+          dynamodb = boto3.resource('dynamodb')
+          table_name = os.environ['ORG_METADATA_DATA_SOURCE_TABLE']
+          table = dynamodb.Table(table_name)
+
+          # Setup logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def unflatten_tags(flattened):
+              """Convert a flattened tag string into a dictionary."""
+              tags = {}
+              for pair in flattened.split(","):
+                  key, value = pair.split(":")
+                  tags[key] = value
+              return tags
+
+          def handler(event, context):
+              try:
+                  # Extract the tag name and value from the event path parameters
+                  tag_name = event['pathParameters']['tag_name']
+                  tag_value = event['pathParameters']['tag_value']
+                  search_string = f"{tag_name}:{tag_value}"
+
+                  # Use DynamoDB's scan operation with a filter expression to find items with the specified tag
+                  response = table.scan(
+                      FilterExpression="contains(flattenedTags, :tag)",
+                      ExpressionAttributeValues={
+                          ':tag': search_string
+                      }
+                  )
+                  
+                  # Unflatten the tags in the returned items
+                  items = response['Items']
+                  for item in items:
+                      if 'flattenedTags' in item:
+                          item['tags'] = unflatten_tags(item['flattenedTags'])
+                          del item['flattenedTags']
+
+                  # Return the modified items
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(items)
+                  }
+
+              except Exception as e:
+                  logger.error(f"Error processing the request: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('Internal Server Error'),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
+                  }
+
+  TagApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TagLambdaFunction
+      Principal: apigateway.amazonaws.com
+
+  TagValueMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      HttpMethod: GET
+      ResourceId: !Ref TagValueResource
+      RestApiId: !Ref AWSOrgMetadataApi
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            "application/json": 'Empty'
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TagLambdaFunction.Arn}/invocations
+  # tag section
+  #############
+
+  ##############
+  # tags section
+  TagsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref RootResource
+      PathPart: 'tags'
+
+  TagsQueryParameterResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref TagsResource
+      PathPart: '{tags_query}'
+
+  TagsLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: DynamoDB
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}
+
+  TagsLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt TagsLambdaExecutionRole.Arn
+      FunctionName: ReturnTagsFunction
+      Runtime: python3.11
+      Environment:
+        Variables: 
+          ORG_METADATA_DATA_SOURCE_TABLE: !Ref OrgMetadataDynamoDBTable
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import json
+          import logging
+
+          dynamodb = boto3.resource('dynamodb')
+          table_name = os.environ['ORG_METADATA_DATA_SOURCE_TABLE']
+          table = dynamodb.Table(table_name)
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def unflatten_tags(flattened):
+              tags = {}
+              for pair in flattened.split(","):
+                  key, value = pair.split(":")
+                  tags[key] = value
+              return tags
+
+          def handler(event, context):
+              try:
+                  tags_query = event['pathParameters']['tags_query']
+                  tags = unflatten_tags(tags_query)
+
+                  filter_expressions = []
+                  attribute_values = {}
+
+                  for key, value in tags.items():
+                      filter_key = f":tag_{key}"
+                      filter_expressions.append(f"contains(flattenedTags, {filter_key})")
+                      attribute_values[filter_key] = f"{key}:{value}"
+
+                  filter_expression = " AND ".join(filter_expressions)
+
+                  response = table.scan(
+                      FilterExpression=filter_expression,
+                      ExpressionAttributeValues=attribute_values
+                  )
+
+                  items = response['Items']
+                  for item in items:
+                      if 'flattenedTags' in item:
+                          item['tags'] = unflatten_tags(item['flattenedTags'])
+                          del item['flattenedTags']
+
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(items)
+                  }
+
+              except Exception as e:
+                  logger.error(f"Error processing the request: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('Internal Server Error'),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
+                  }
+
+  TagsApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TagsLambdaFunction
+      Principal: apigateway.amazonaws.com
+
+  TagsQueryParameterMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      HttpMethod: GET
+      ResourceId: !Ref TagsQueryParameterResource
+      RestApiId: !Ref AWSOrgMetadataApi
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            "application/json": 'Empty'
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TagsLambdaFunction.Arn}/invocations
+  # tags section
+  ##############
+
+  #####################
+  # ou section
+  OUResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref RootResource
+      PathPart: ou
+
+  OUValueResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref OUResource
+      PathPart: '{ou}'
+
+  OULambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: DynamoDB
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}/index/OULevel1Index
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}/index/OULevel2Index
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}/index/OULevel3Index
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}/index/OULevel4Index
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}/index/OULevel5Index
+
+  OULambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt OULambdaExecutionRole.Arn
+      FunctionName: ReturnOUFunction
+      Runtime: python3.11
+      Environment:
+        Variables:
+          ORG_METADATA_DATA_SOURCE_TABLE: !Ref OrgMetadataDynamoDBTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          dynamodb = boto3.resource('dynamodb')
+          table_name = os.environ['ORG_METADATA_DATA_SOURCE_TABLE']
+          table = dynamodb.Table(table_name)
+
+          def unflatten_tags(flattened):
+              """Convert a flattened tag string into a dictionary."""
+              tags = {}
+              for pair in flattened.split(","):
+                  key, value = pair.split(":")
+                  tags[key] = value
+              return tags
+
+          def handler(event, context):
+              input_ous = event['pathParameters']['ou'].split(',')
+              
+              all_items = []
+              for ou in input_ous:
+                  # Try to match the provided OU with each of the OU levels
+                  matching_ou_level = None
+                  for i in range(1, 6):  # assuming a maximum of 5 OU levels
+                      query_key = f'ouLevel{i}'
+                      response = table.query(
+                          IndexName=f'OULevel{i}Index',
+                          KeyConditionExpression=boto3.dynamodb.conditions.Key(query_key).eq(ou),
+                          Limit=1  # Only need 1 item to verify if this OU level matches
+                      )
+                      
+                      if response.get('Items'):
+                          matching_ou_level = i
+                          break
+
+                  # If no matching OU level is found for this OU, skip to the next OU
+                  if not matching_ou_level:
+                      continue
+
+                  # Fetch all the accounts at the determined OU level or below
+                  for i in range(matching_ou_level, 6):  # fetch items from matching OU level to level 5
+                      query_key = f'ouLevel{i}'
+                      response = table.query(
+                          IndexName=f'OULevel{i}Index',
+                          KeyConditionExpression=boto3.dynamodb.conditions.Key(query_key).eq(ou)
+                      )
+                      all_items.extend(response['Items'])
+
+              # Unflatten tags for each item
+              for item in all_items:
+                  if 'flattenedTags' in item:
+                      item['tags'] = unflatten_tags(item['flattenedTags'])
+                      del item['flattenedTags']
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(all_items),
+                  'headers': {
+                      'Content-Type': 'application/json'
+                  }
+              }
+
+  OuApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref OULambdaFunction
+      Principal: apigateway.amazonaws.com
+
+  OUMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      HttpMethod: GET
+      ResourceId: !Ref OUValueResource
+      RestApiId: !Ref AWSOrgMetadataApi
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            "application/json": 'Empty'
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OULambdaFunction.Arn}/invocations
+  # ou section
+  #####################
+
+  #####################
+  # email section
+  EmailResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref RootResource
+      PathPart: email
+
+  EmailValueResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      ParentId: !Ref  EmailResource
+      PathPart: '{email}'
+
+  EmailLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: DynamoDB
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrgMetadataDynamoDBTable}/index/EmailIndex
+
+  EmailLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt  EmailLambdaExecutionRole.Arn
+      FunctionName: ReturnEmailFunction
+      Runtime: python3.11
+      Environment:
+        Variables: 
+          ORG_METADATA_DATA_SOURCE_TABLE: !Ref OrgMetadataDynamoDBTable
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import json
+          import logging
+
+          # Initialize a DynamoDB client and table reference
+          dynamodb = boto3.resource('dynamodb')
+          table_name = os.environ['ORG_METADATA_DATA_SOURCE_TABLE']
+          table = dynamodb.Table(table_name)
+
+          # Setup logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def unflatten_tags(flattened):
+              """Convert a flattened tag string into a dictionary."""
+              tags = {}
+              for pair in flattened.split(","):
+                  key, value = pair.split(":")
+                  tags[key] = value
+              return tags
+
+          def fetch_records_for_email(email):
+              """Fetch records from DynamoDB for a given email."""
+              response = table.query(
+                  IndexName="EmailIndex",
+                  KeyConditionExpression="emailAddress = :email",
+                  ExpressionAttributeValues={
+                      ':email': email
+                  }
+              )
+              return response['Items']
+
+          def handler(event, context):
+              try:
+                  # Extract the emails from the event path parameters and split by comma
+                  emails = event['pathParameters']['email'].split(',')
+                  
+                  all_items = []
+                  for email in emails:
+                      items = fetch_records_for_email(email.strip())  # Trim whitespace, just in case
+                      for item in items:
+                          if 'flattenedTags' in item:
+                              item['tags'] = unflatten_tags(item['flattenedTags'])
+                              del item['flattenedTags']
+                      all_items.extend(items)
+
+                  # Return the collected items
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(all_items)
+                  }
+
+              except Exception as e:
+                  logger.error(f"Error processing the request: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('Internal Server Error'),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
+                  }
+
+  EmailApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref EmailLambdaFunction
+      Principal: apigateway.amazonaws.com
+
+  EmailMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      HttpMethod: GET
+      ResourceId: !Ref EmailValueResource
+      RestApiId: !Ref AWSOrgMetadataApi
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            "application/json": 'Empty'
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${EmailLambdaFunction.Arn}/invocations
+  # email section
+  #####################
+
+  ################
+  # authentication
+  AWSOrgMetadataApiKey:
+    Type: "AWS::ApiGateway::ApiKey"
+    Properties: 
+      Description: "Key for AWSOrgMetadataApi"
+      Enabled: "true"
+      Name: "DevKey"
+
+  AWSOrgMetadataUsagePlan:
+    Type: "AWS::ApiGateway::UsagePlan"
+    Properties: 
+      ApiStages: 
+        - ApiId: !Ref AWSOrgMetadataApi
+          Stage: "v1"
+      Description: "Usage plan for AWSOrgMetadataApi"
+      UsagePlanName: "AWSOrgMetadataUsagePlan"
+
+  AWSOrgMetadataUsagePlanKey:
+    Type: "AWS::ApiGateway::UsagePlanKey"
+    Properties: 
+      KeyId: !Ref AWSOrgMetadataApiKey
+      KeyType: "API_KEY"
+      UsagePlanId: !Ref AWSOrgMetadataUsagePlan
+  # authentication
+  ################
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - AccountIdMethod
+      - TagValueMethod
+      - AccountStatusMethod
+      - OUMethod
+      - EmailMethod
+    Properties:
+      RestApiId: !Ref AWSOrgMetadataApi
+      Description: Deployment to prod stage
+      StageName: v1
+
+Outputs:
+  ApiURL:
+    Description: URL for the API Gateway
+    Value: !Sub https://${AWSOrgMetadataApi}.execute-api.${AWS::Region}.amazonaws.com/v1/

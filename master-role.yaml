@@ -1,0 +1,66 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation template to create a cross-account IAM role for Lambda to be able to query AWS Organizations.
+
+Metadata:
+  Author: Tomek Klas
+  Email: aws-org-metadata@tomekklas.com
+  SourceRepository: https://github.com/tomekklas/aws-org-metadata
+  Date: 2023-11-02
+  Version: 1.0.0
+  License: Apache License 2.0
+  Description: >
+    This CloudFormation template creates an IAM role to allow Lambda functions in one AWS account 
+    to read AWS Organizations data from another account. It enables cross-account access 
+    with permissions limited to listing organizational entities and their associated metadata, 
+    facilitating governance and account management tasks.
+
+Parameters:
+  LambdaAccountId:
+    Description: The AWS Account ID where the Lambda function resides.
+    Type: String
+    AllowedPattern: '^\d{12}$'
+    ConstraintDescription: Must be a valid 12-digit AWS account ID.
+
+Resources:
+  CrossAccountLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-CrossAccountLambdaRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS:
+              - !Sub arn:aws:iam::${LambdaAccountId}:root
+          Action:
+            - sts:AssumeRole
+          Condition:
+            StringEquals:
+              sts:ExternalId: !Join ['-', ['id', !Join [ '-', [ !Select [4, !Split ['-', !Select ['2', !Split ['/', !Ref AWS::StackId ] ] ] ] ] ] ] ]
+      Policies:
+        - PolicyName: OrgDataFetchPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - organizations:ListAccounts
+                - organizations:ListParents
+                - organizations:ListTagsForResource
+              Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: Production
+        - Key: Role
+          Value: CrossAccountLambdaRole
+
+Outputs:
+  CrossAccountRoleARN:
+    Description: ARN of the role that the Lambda function will assume.
+    Value: !GetAtt CrossAccountLambdaRole.Arn
+
+  CrossAccountRoleARNExternalId:
+    Description: External ID for assuming the CrossAccountLambdaRole, used for enhanced security.
+    Value: !Join ['-', ['id', !Join [ '-', [ !Select [4, !Split ['-', !Select ['2', !Split ['/', !Ref AWS::StackId ] ] ] ] ] ] ] ]
