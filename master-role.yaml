@@ -16,8 +16,8 @@ Metadata:
     facilitating governance and account management tasks.
 
 Parameters:
-  LambdaAccountId:
-    Description: The AWS Account ID where the Lambda function resides.
+  ApiAccountId:
+    Description: The AWS Account ID where the Api Gateway will reside.
     Type: String
     AllowedPattern: '^\d{12}$'
     ConstraintDescription: Must be a valid 12-digit AWS account ID.
@@ -26,14 +26,13 @@ Resources:
   CrossAccountLambdaRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${AWS::StackName}-CrossAccountLambdaRole
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
         - Effect: Allow
           Principal:
             AWS:
-              - !Sub arn:aws:iam::${LambdaAccountId}:root
+              - !Sub arn:aws:iam::${ApiAccountId}:root
           Action:
             - sts:AssumeRole
           Condition:

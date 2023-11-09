@@ -102,81 +102,157 @@ The project can be installed using the AWS Management Console or the AWS CLI.
 
 The following commands can be used to deploy the respective templates:
 
-#### Management account
+#### Assume role in Management account and then run:
 ```bash
+# Replace with the actual API deployment account ID
+API_ACCOUNT_ID=<API deployment account id>
 aws cloudformation deploy \
+  --stack-name aws-org-metadata-master-role-stack \
   --template-file master-role.yaml \
-  --stack-name master-role-stack \
-  --parameter-overrides LambdaAccountId=<account_id>
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides ApiAccountId=${API_ACCOUNT_ID}
+```
+#### Wait for the stack to be created and then run:
+```bash
+CROSS_ACCOUNT_ROLE_ARN=$(aws cloudformation describe-stacks \
+    --stack-name aws-org-metadata-master-role-stack \
+    --query 'Stacks[0].Outputs[?OutputKey==`CrossAccountRoleARN`].OutputValue' \
+    --output text)
+
+CROSS_ACCOUNT_ROLE_ARN_EXTERNAL_ID=$(aws cloudformation describe-stacks \
+    --stack-name aws-org-metadata-master-role-stack \
+    --query 'Stacks[0].Outputs[?OutputKey==`CrossAccountRoleARNExternalId`].OutputValue' \
+    --output text)
+
+echo "CrossAccountRoleARN: ${CROSS_ACCOUNT_ROLE_ARN}"
+echo "CrossAccountRoleARNExternalId: ${CROSS_ACCOUNT_ROLE_ARN_EXTERNAL_ID}"
+```
+> **Note:**
+> Values of CrossAccountRoleARN and CrossAccountRoleARNExternalId as those are going to be needed in next steps.  
+
+#### Assume role in API account and then run:
+```bash
+# Update with values returned in previous step
+CROSS_ACCOUNT_ROLE_ARN="arn:aws:iam::123456789012:role/YourCrossAccountRole"
+CROSS_ACCOUNT_ROLE_ARN_EXTERNAL_ID="ExternalIdValue"
+
+# Deploy the stack with the parameter overrides
+aws cloudformation deploy \
+    --stack-name aws-org-metadata-data-source-stack \
+    --template-file data-source.yaml \
+    --capabilities CAPABILITY_IAM \
+    --parameter-overrides \
+    CrossAccountRoleARN=$CROSS_ACCOUNT_ROLE_ARN \
+    CrossAccountRoleARNExternalId=${CROSS_ACCOUNT_ROLE_ARN_EXTERNAL_ID}
+
+# Retrieve DynamoDB table name from Outputs
+ORG_METADATA_DYNAMO_DB_TABLE=$(aws cloudformation describe-stacks \
+    --stack-name aws-org-metadata-data-source-stack \
+    --query 'Stacks[0].Outputs[?OutputKey==`OrgMetadataDynamoDBTable`].OutputValue' \
+    --output text)
+
+echo "OrgMetadataDynamoDBTable: ${ORG_METADATA_DYNAMO_DB_TABLE}"
+
+aws cloudformation deploy \
+    --stack-name aws-org-metadata-data-api-gateway-stack \
+    --template-file api-gateway.yaml \
+    --capabilities CAPABILITY_IAM \
+    --parameter-overrides \
+        OrgMetadataDynamoDBTable=${ORG_METADATA_DYNAMO_DB_TABLE}
 ```
 
-#### API / Data account
+### The following commands will trigger initial scan of AWS Organizational data
+Run the following commands from API account
 ```bash
-aws cloudformation deploy \
-    --template-file data-source.yaml \
-    --stack-name data-source-stack \
-    --parameter-overrides \
-        ParameterKey=OrgCrossAccountRoleArn,ParameterValue=<value> \
-        ParameterKey=ExternalID,ParameterValue=<value>
+FETCH_ACCOUNT_IDS_LAMBDA_NAME=$(aws cloudformation describe-stacks \
+    --stack-name aws-org-metadata-data-source-stack \
+    --query 'Stacks[0].Outputs[?OutputKey==`FetchAccountIdsLambdaName`].OutputValue' \
+    --output text)
 
-aws cloudformation deploy \
-    --template-file api-gateway.yaml \
-    --stack-name api-gateway-stack \
-    --parameter-overrides \
-        ParameterKey=OrgMetadataDynamoDBTable,ParameterValue=<value>
+aws lambda invoke \
+    --function-name ${FETCH_ACCOUNT_IDS_LAMBDA_NAME} \
+    --invocation-type Event \
+    /tmp/outfile.txt
+```
+This should return 
+```json
+{
+    "StatusCode": 202
+}
+```
+Depending on the size of the organization, this process could take few minutes, but some results should be available within seconds.
+
+### Retrieve Api Gateway url
+```bash
+API_GATEWAY_URL=$(aws cloudformation describe-stacks \
+    --stack-name aws-org-metadata-data-api-gateway-stack \
+    --query 'Stacks[0].Outputs[?OutputKey==`ApiURL`].OutputValue' \
+    --output text)
+```
+
+### Retrieve default Api Gateway key
+```bash
+# Step 1: List all API keys and get the ID of the desired key
+API_KEY_ID=$(aws apigateway get-api-keys --query 'items[?name==`AWSOrgMetadataServiceDefaultKey`].id' --output text | head -n 1)
+
+# Step 2: Get the API key value using the ID obtained above
+if [ -n "$API_KEY_ID" ]; then
+    API_KEY_VALUE=$(aws apigateway get-api-key --api-key "$API_KEY_ID" --include-value --query 'value' --output text)
+    echo "API Key Value: ${API_KEY_VALUE}"
+else
+    echo "API Key with the name AWSOrgMetadataServiceDefaultKey not found."
+fi
 ```
 
 ### Sample CURL Queries
+> **Note:**
+> Please note that those bash variables from previous 2 steps are required:  
+> - API_GATEWAY_URL  
+> - API_KEY_VALUE  
 
-To interact with the API, you can use the following CURL commands:
+#### To interact with the API you can use the following CURL commands:
 
 #### Accounts
 ```bash
-curl --location 'https://[api-id].execute-api.[region].amazonaws.com/v1/aws-org-metadata/account/{account_ids}' \
-        --header 'x-api-key: [your-api-key]'
+ACCOUNT_IDS="comma_separated_account_ids"  # Replace with actual account IDs
+curl --location --request GET "${API_GATEWAY_URL}/aws-org-metadata/account/${ACCOUNT_IDS}" --header "x-api-key: ${API_KEY_VALUE}"
 ```
 
 #### Email
 ```bash
-curl --location 'https://[api-id].execute-api.[region].amazonaws.com/v1/aws-org-metadata/email/{email}' \
-        --header 'x-api-key: [your-api-key]'
-
+EMAILS="comma_separated_emails"  # Replace with actual emails
+curl --location --request GET "${API_GATEWAY_URL}/aws-org-metadata/email/${EMAILS}" --header "x-api-key: ${API_KEY_VALUE}"
 ```
 
-#### Organizational Unit (OU)
+#### Organizational Unit (comma separated)
 ```bash
-curl --location 'https://[api-id].execute-api.[region].amazonaws.com/v1/aws-org-metadata/ou/{ou_ids}' \
-        --header 'x-api-key: [your-api-key]'
-
+OU_IDS="comma_separated_ou_ids"  # Replace with actual OU IDs
+curl --location --request GET "${API_GATEWAY_URL}/aws-org-metadata/ou/${OU_IDS}" --header "x-api-key: ${API_KEY_VALUE}"
 ```
 
 #### Status
 ```bash
-curl --location 'https://[api-id].execute-api.[region].amazonaws.com/v1/aws-org-metadata/status/{status}' \
-        --header 'x-api-key: [your-api-key]'
-
+STATUS="specific_status"  # Replace with actual status
+curl --location --request GET "${API_GATEWAY_URL}/aws-org-metadata/status/${STATUS}" --header "x-api-key: ${API_KEY_VALUE}"
 ```
 
 #### Tag
 ```bash
-curl --location 'https://[api-id].execute-api.[region].amazonaws.com/v1/aws-org-metadata/tag/{tag_name}/{tag_value}' \
-        --header 'x-api-key: [your-api-key]'
-
+TAG_NAME="specific_tag_name"   # Replace with actual tag name
+TAG_VALUE="specific_tag_value" # Replace with actual tag value
+curl --location --request GET "${API_GATEWAY_URL}/aws-org-metadata/tag/${TAG_NAME}/${TAG_VALUE}" --header "x-api-key: ${API_KEY_VALUE}"
 ```
 
 #### Tags
 ```bash
-curl --location 'https://[api-id].execute-api.[region].amazonaws.com/v1/aws-org-metadata/tags/{tags_query}' \
-        --header 'x-api-key: [your-api-key]'
-
+TAGS_QUERY="Key1:Value1,Key2:Value2,"  # Replace with actual tag query
+curl --location --request GET "${API_GATEWAY_URL}/aws-org-metadata/tags/${TAGS_QUERY}" --header "x-api-key: ${API_KEY_VALUE}"
 ```
 
-#### Example
-```bash
-curl --location 'https://[api-id].execute-api.[region].amazonaws.com/v1/aws-org-metadata/account/123456789012,098765432123' \
-        --header 'x-api-key: [your-api-key]'
+## Changelog
 
-```
+For all notable changes to this project, see the [CHANGELOG.md](CHANGELOG.md).
+
 
 ### Credits
 

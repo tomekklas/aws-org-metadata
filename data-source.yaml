@@ -18,14 +18,14 @@ Metadata:
     facilitating improved organizational oversight and resource governance.
 
 Parameters:
-  OrgCrossAccountRoleArn:
+  CrossAccountRoleARN:
     Description: The Amazon Resource Name (ARN) of the IAM role outputted by the master-role.yaml template in the management account. This ARN is used by the Lambda function to assume the role for cross-account access.
     Type: String
     AllowedPattern: 'arn:aws:iam::[0-9]{12}:role/.+'
     ConstraintDescription: Must be a valid ARN of an IAM role in the format arn:aws:iam::{account}:role/{rolename}.
 
   CrossAccountRoleARNExternalId:
-    Description: A unique identifier outputted by the master-role.yaml template in the management account. It is used in conjunction with the OrgCrossAccountRoleArn to enhance security during the cross-account role assumption process.
+    Description: A unique identifier outputted by the master-role.yaml template in the management account. It is used in conjunction with the CrossAccountRoleARN to enhance security during the cross-account role assumption process.
     Type: String
     NoEcho: true
     AllowedPattern: 'id-[0-9a-fA-F]{12,}'
@@ -150,7 +150,7 @@ Resources:
                 Action:
                   - sts:AssumeRole
                 Resource:
-                  - !Ref OrgCrossAccountRoleArn
+                  - !Ref CrossAccountRoleARN
                 Condition:
                   StringEquals:
                     sts:ExternalId: !Ref CrossAccountRoleARNExternalId
@@ -171,13 +171,12 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt FetchAccountIdsLambdaExecutionRole.Arn
-      FunctionName: FetchAccountIdsLambda
       Runtime: python3.11
       Timeout: 600
       Environment:
         Variables:
           SQS_URL: !Ref AccountIdQueue
-          ORG_CROSS_ACCOUNT_ROLE_ARN: !Ref OrgCrossAccountRoleArn
+          ORG_CROSS_ACCOUNT_ROLE_ARN: !Ref CrossAccountRoleARN
           EXTERNAL_ID: !Ref CrossAccountRoleARNExternalId
       Code:
         ZipFile: |
@@ -313,7 +312,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - sts:AssumeRole
-                Resource: !Ref OrgCrossAccountRoleArn
+                Resource: !Ref CrossAccountRoleARN
         - PolicyName: LambdaCloudWatchLogsPolicy
           PolicyDocument:
             Version: '2012-10-17'
@@ -354,7 +353,7 @@ Resources:
       Environment:
         Variables:
           DYNAMODB_TABLE: !Ref OrgMetadataDynamoDBTable
-          ORG_CROSS_ACCOUNT_ROLE_ARN: !Ref OrgCrossAccountRoleArn
+          ORG_CROSS_ACCOUNT_ROLE_ARN: !Ref CrossAccountRoleARN
           EXTERNAL_ID: !Ref CrossAccountRoleARNExternalId
           RETRY_MODE: 'standard' # or 'adaptive'
           MAX_ATTEMPTS: '5'
@@ -403,7 +402,7 @@ Resources:
 
           def handler(event, context):
               try:
-                  org_cross_account_role_arn = event.get('OrgCrossAccountRoleArn', ORG_CROSS_ACCOUNT_ROLE_ARN)
+                  org_cross_account_role_arn = event.get('CrossAccountRoleARN', ORG_CROSS_ACCOUNT_ROLE_ARN)
 
                   sts_client = boto3.client('sts', config=retry_config)
                   assumed_role_object = sts_client.assume_role(
@@ -484,3 +483,7 @@ Outputs:
   OrgMetadataDynamoDBTable:
     Description: The name of the DynamoDB table with AWS Organizational data
     Value: !Ref OrgMetadataDynamoDBTable
+
+  FetchAccountIdsLambdaName:
+    Description: Arn of a lambda which triggers meta db update process.
+    Value: !Ref FetchAccountIdsLambda
