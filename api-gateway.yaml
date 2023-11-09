@@ -979,33 +979,8 @@ Resources:
   # email section
   #####################
 
-  ################
-  # authentication
-  AWSOrgMetadataApiKey:
-    Type: "AWS::ApiGateway::ApiKey"
-    Properties: 
-      Description: "Key for AWSOrgMetadataApi"
-      Enabled: "true"
-      Name: "DevKey"
-
-  AWSOrgMetadataUsagePlan:
-    Type: "AWS::ApiGateway::UsagePlan"
-    Properties: 
-      ApiStages: 
-        - ApiId: !Ref AWSOrgMetadataApi
-          Stage: "v1"
-      Description: "Usage plan for AWSOrgMetadataApi"
-      UsagePlanName: "AWSOrgMetadataUsagePlan"
-
-  AWSOrgMetadataUsagePlanKey:
-    Type: "AWS::ApiGateway::UsagePlanKey"
-    Properties: 
-      KeyId: !Ref AWSOrgMetadataApiKey
-      KeyType: "API_KEY"
-      UsagePlanId: !Ref AWSOrgMetadataUsagePlan
-  # authentication
-  ################
-
+  ############
+  # deployment
   ApiGatewayDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
@@ -1018,6 +993,36 @@ Resources:
       RestApiId: !Ref AWSOrgMetadataApi
       Description: Deployment to prod stage
       StageName: v1
+  # deployment
+  ############
+
+  ################
+  # authentication
+  AWSOrgMetadataUsagePlan:
+    Type: "AWS::ApiGateway::UsagePlan"
+    DependsOn: ApiGatewayDeployment
+    Properties: 
+      ApiStages: 
+        - ApiId: !Ref AWSOrgMetadataApi
+          Stage: "v1"
+      Description: "Usage plan for AWSOrgMetadataApi"
+      UsagePlanName: "AWSOrgMetadataUsagePlan"
+
+  AWSOrgMetadataApiKey:
+    Type: "AWS::ApiGateway::ApiKey"
+    Properties: 
+      Description: "Key for AWSOrgMetadataApi"
+      Enabled: "true"
+      Name: "AWSOrgMetadataServiceDefaultKey"
+
+  AWSOrgMetadataUsagePlanKey:
+    Type: "AWS::ApiGateway::UsagePlanKey"
+    Properties: 
+      KeyId: !Ref AWSOrgMetadataApiKey
+      KeyType: "API_KEY"
+      UsagePlanId: !Ref AWSOrgMetadataUsagePlan
+  # authentication
+  ################
 
 Outputs:
   ApiURL:
