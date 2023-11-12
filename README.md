@@ -212,10 +212,10 @@ fi
 
 #### To interact with the API you can use the following CURL commands:
 
-#### Accounts
+#### Account Ids
 ```bash
 ACCOUNT_IDS="comma_separated_account_ids"  # Replace with actual account IDs
-curl --location --request GET "${API_GATEWAY_URL}/aws-org-metadata/account/${ACCOUNT_IDS}" --header "x-api-key: ${API_KEY_VALUE}"
+curl --location --request GET "${API_GATEWAY_URL}/aws-org-metadata/account_id/${ACCOUNT_IDS}" --header "x-api-key: ${API_KEY_VALUE}"
 ```
 
 #### Email
@@ -248,6 +248,34 @@ curl --location --request GET "${API_GATEWAY_URL}/aws-org-metadata/tag/${TAG_NAM
 TAGS_QUERY="Key1:Value1,Key2:Value2,"  # Replace with actual tag query
 curl --location --request GET "${API_GATEWAY_URL}/aws-org-metadata/tags/${TAGS_QUERY}" --header "x-api-key: ${API_KEY_VALUE}"
 ```
+
+## Responses Status Codes
+
+The following HTTP status codes are used in the responses:
+
+### 200 OK
+- **Description**: The request was successful. The Lambda function executed as expected and returned results, which may include an empty dataset.
+- **Body**: Depending on the specific Lambda function, the response body typically contains the result of the operation. If no matching data is found, a message indicating 'No items found' is included.
+
+### 400 Bad Request
+- **Description**: The request was invalid or improperly formatted. This status is returned when required parameters are missing or malformed.
+- **Body**: The response body contains an error message detailing the nature of the bad request.
+
+### 500 Internal Server Error
+- **Description**: An internal server error occurred while processing the request. This status indicates that the Lambda function encountered an unexpected condition which prevented it from fulfilling the request.
+- **Body**: The response body contains a generic error message such as 'Internal Server Error'. More detailed information can be found in the Lambda function logs in AWS CloudWatch.
+
+## Response Headers
+
+All responses include the following header:
+- `Content-Type`: `application/json`
+
+The `Content-Type` header indicates that the response body is formatted as a JSON object.
+
+## Notes
+
+- The status codes are consistent across different API calls. However, the exact structure of the response body may vary depending on the specific operation performed by the API.
+- For detailed information on each specific API call and its operation, please refer to the API's individual documentation or implementation details.
 
 ## Changelog
 
