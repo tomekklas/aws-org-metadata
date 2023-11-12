@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.2] - 2023-11-12
+
+### Added
+
+- **Enhanced Documentation**: Updated README.md to provide comprehensive details on response messages and data formats for better user understanding.
+- **API Endpoint Refinement**: Modified the API endpoint from aws-org-metadata/account/{account_id} to aws-org-metadata/account_id/{account_id} for improved clarity and consistency in URL naming conventions.
+
+### Fixed
+
+- **Consistent No-Result Responses**: Standardized the response format for scenarios where no results are found. This ensures uniformity and predictability in API responses, enhancing the overall user experience and ease of handling different response scenarios programmatically.
+
+
+
 ## [1.0.1] - 2023-11-09
 
 ### Added

@@ -46,7 +46,7 @@ Resources:
     Properties:
       RestApiId: !Ref AWSOrgMetadataApi
       ParentId: !Ref RootResource
-      PathPart: account
+      PathPart: account_id
 
   AccountIdValueResource:
     Type: AWS::ApiGateway::Resource
@@ -149,23 +149,14 @@ Resources:
                           item['tags'] = unflatten_tags(item['flattenedTags'])
                           del item['flattenedTags']
 
-                  # If items are found in the table, return them
-                  if items:
-                      return {
-                          'statusCode': 200,
-                          'body': json.dumps(items),
-                          'headers': {
-                              'Content-Type': 'application/json'
-                          }
+                  # Return the results, even if empty
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(items) if items else json.dumps({'message': 'No accounts found'}),
+                      'headers': {
+                          'Content-Type': 'application/json'
                       }
-                  else:
-                      return {
-                          'statusCode': 404,
-                          'body': json.dumps({'error': 'Accounts not found'}),
-                          'headers': {
-                              'Content-Type': 'application/json'
-                          }
-                      }
+                  }
 
               except Exception as e:
                   logger.error(f"Error processing the request: {str(e)}")
@@ -275,7 +266,6 @@ Resources:
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
-          # TODO: Add this to lambda layer so it can be re-used
           def unflatten_tags(flattened_tags):
               """
               Convert a flattened tag string into a dictionary.
@@ -286,9 +276,7 @@ Resources:
                   tags[key] = value
               return tags
 
-
           def handler(event, context):
-
               # Extract status from the path parameters
               status = event.get('pathParameters', {}).get('status')
               if not status:
@@ -319,10 +307,10 @@ Resources:
                           item['tags'] = unflatten_tags(flattened_tags)
                           del item['flattenedTags']
 
-                  # Return the results
+                  # Return the results, even if empty
                   return {
                       'statusCode': 200,
-                      'body': json.dumps(items),
+                      'body': json.dumps(items) if items else json.dumps({'message': 'No items found'}),
                       'headers': {
                           'Content-Type': 'application/json'
                       }
@@ -478,10 +466,13 @@ Resources:
                           item['tags'] = unflatten_tags(item['flattenedTags'])
                           del item['flattenedTags']
 
-                  # Return the modified items
+                  # Return the modified items, even if empty
                   return {
                       'statusCode': 200,
-                      'body': json.dumps(items)
+                      'body': json.dumps(items) if items else json.dumps({'message': 'No items found'}),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
                   }
 
               except Exception as e:
@@ -629,9 +620,13 @@ Resources:
                           item['tags'] = unflatten_tags(item['flattenedTags'])
                           del item['flattenedTags']
 
+                  # Return the modified items, even if empty
                   return {
                       'statusCode': 200,
-                      'body': json.dumps(items)
+                      'body': json.dumps(items) if items else json.dumps({'message': 'No items found'}),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
                   }
 
               except Exception as e:
@@ -793,9 +788,10 @@ Resources:
                       item['tags'] = unflatten_tags(item['flattenedTags'])
                       del item['flattenedTags']
 
+              # Return the modified items, even if empty
               return {
                   'statusCode': 200,
-                  'body': json.dumps(all_items),
+                  'body': json.dumps(all_items) if all_items else json.dumps({'message': 'No items found'}),
                   'headers': {
                       'Content-Type': 'application/json'
                   }
@@ -937,10 +933,13 @@ Resources:
                               del item['flattenedTags']
                       all_items.extend(items)
 
-                  # Return the collected items
+                  # Return the collected items, even if empty
                   return {
                       'statusCode': 200,
-                      'body': json.dumps(all_items)
+                      'body': json.dumps(all_items) if all_items else json.dumps({'message': 'No items found'}),
+                      'headers': {
+                          'Content-Type': 'application/json'
+                      }
                   }
 
               except Exception as e:
