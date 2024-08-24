@@ -23,6 +23,14 @@ Parameters:
     Type: String
     Description: The name of the DynamoDB table where AWS Organizational metadata is stored.
 
+  ApiVpcEndpointId:
+    Type: String
+    Description: The VPC Endpoint ID for the API Gateway (leave blank for public API)
+    Default: ""
+
+Conditions:
+  ApiGatewayIsPrivate: !Not [!Equals [!Ref ApiVpcEndpointId, ""]]
+
 Resources:
 
   AWSOrgMetadataApi:
@@ -31,6 +39,17 @@ Resources:
       Name: AWSOrgMetadataService
       Description: API service to access and manage AWS Organizational Metadata."
       FailOnWarnings: true
+      EndpointConfiguration:
+        Types: 
+          - !If 
+              - ApiGatewayIsPrivate
+              - PRIVATE
+              - REGIONAL
+        VpcEndpointIds: 
+          - !If 
+              - ApiGatewayIsPrivate
+              - !Ref ApiVpcEndpointId
+              - !Ref AWS::NoValue
 
   RootResource:
     Type: AWS::ApiGateway::Resource
