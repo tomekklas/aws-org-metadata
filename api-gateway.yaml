@@ -579,56 +579,75 @@ Resources:
           import boto3
           import json
           import logging
-
+          
           dynamodb = boto3.resource('dynamodb')
           table_name = os.environ['ORG_METADATA_DATA_SOURCE_TABLE']
           table = dynamodb.Table(table_name)
-
+          
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-
+          
           def unflatten_tags(flattened):
               tags = {}
               for pair in flattened.split(","):
                   key, value = pair.split(":")
                   tags[key] = value
               return tags
-
+          
           def handler(event, context):
+              
+              logger.info(f"Event received: {event}")
+          
               try:
                   tags_query = event['pathParameters']['tags_query']
                   tags = unflatten_tags(tags_query)
-
+          
                   filter_expressions = []
                   attribute_values = {}
-
+          
                   for key, value in tags.items():
                       filter_key = f":tag_{key}"
+                      # Using contains for partial matching within flattenedTags
                       filter_expressions.append(f"contains(flattenedTags, {filter_key})")
                       attribute_values[filter_key] = f"{key}:{value}"
-
+          
                   filter_expression = " AND ".join(filter_expressions)
-
+          
+                  logger.info(f"Filter expression: {filter_expression}")
+                  logger.info(f"Expression attribute values: {attribute_values}")
+          
+                  # Perform the scan
                   response = table.scan(
                       FilterExpression=filter_expression,
                       ExpressionAttributeValues=attribute_values
                   )
-
+          
+                  logger.info(f"DynamoDB response: {response}")
+          
                   items = response['Items']
-                  for item in items:
-                      if 'flattenedTags' in item:
-                          item['tags'] = unflatten_tags(item['flattenedTags'])
-                          del item['flattenedTags']
-
-                  # Return the modified items, even if empty
+          
+                  # Post-process to remove partial matches
+                  def matches_exact(tags_query, flattened_tags):
+                      """Ensure exact match for each tag in the flattenedTags string."""
+                      for key, value in tags.items():
+                          # Look for an exact match in the form of key:value
+                          expected_pair = f"{key}:{value}"
+                          if expected_pair not in flattened_tags.split(","):
+                              return False
+                      return True
+          
+                  filtered_items = [item for item in items if matches_exact(tags_query, item['flattenedTags'])]
+          
+                  logger.info(f"Items after filtering: {filtered_items}")
+                  
                   return {
                       'statusCode': 200,
-                      'body': json.dumps(items) if items else json.dumps({'message': 'No items found'}),
+                      'body': json.dumps(filtered_items) if filtered_items else json.dumps({'message': 'No items found'}),
                       'headers': {
                           'Content-Type': 'application/json'
                       }
                   }
-
+          
               except Exception as e:
                   logger.error(f"Error processing the request: {str(e)}")
                   return {
@@ -638,6 +657,7 @@ Resources:
                           'Content-Type': 'application/json'
                       }
                   }
+
 
   TagsApiGatewayLambdaPermission:
     Type: AWS::Lambda::Permission
